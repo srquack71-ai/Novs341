@@ -1,0 +1,531 @@
+novaera/
+├── requirements.txt
+├── .env.example          (renomeie para .env e preencha)
+├── config.py
+├── main.py
+├── database/
+│   ├── __init__.py       (arquivo vazio)
+│   └── models.py
+├── utils/
+│   ├── __init__.py       (arquivo vazio)
+│   ├── embeds.py
+│   ├── helpers.py
+│   └── checks.py
+└── cogs/
+    ├── __init__.py       (arquivo vazio)
+    ├── utility.py
+    ├── moderation.py
+    ├── automod.py
+    ├── economy.py
+    ├── levels.py
+    ├── tickets.py
+    ├── music.py
+    ├── fun.py
+    ├── welcome.py
+    ├── logging.py
+    ├── ai.py
+    ├── owner.py
+    └── settings.py
+
+requirements.txt
+discord.py>=2.3.2
+aiosqlite>=0.19.0
+aiohttp>=3.9.0
+Pillow>=10.0.0
+python-dotenv>=1.0.0
+yt-dlp>=2024.1.1
+
+.env.example → renomeie para .env
+DISCORD_TOKEN=seu_token_aqui
+PREFIX=!
+OPENAI_API_KEY=
+AI_PROVIDER=openai
+AI_MODEL=gpt-4o-mini
+AI_FALLBACK_MODEL=gpt-3.5-turbo
+OWNER_ID=0
+BOT_STATUS=online
+BOT_ACTIVITY_TYPE=playing
+BOT_ACTIVITY=NovaEra | !help
+DB_PATH=database/database.db
+XP_PER_MESSAGE=15
+
+config.py
+"""Configuração central do NovaEraBot."""
+from __future__ import annotations
+import os
+from dataclasses import dataclass, field
+from dotenv import load_dotenv
+load_dotenv()
+def _get_bool(key: str, default: bool = False) -> bool:
+    val = os.getenv(key, str(default)).strip().lower()
+    return val in ("1", "true", "yes", "on", "y")
+@dataclass
+class Config:
+    token: str = field(default_factory=lambda: os.getenv("DISCORD_TOKEN", ""))
+    prefix: str = field(default_factory=lambda: os.getenv("PREFIX", "!"))
+    # IA
+    ai_provider: str = field(default_factory=lambda: os.getenv("AI_PROVIDER", "openai"))
+    ai_api_key: str = field(default_factory=lambda: os.getenv("OPENAI_API_KEY", ""))
+    ai_model: str = field(default_factory=lambda: os.getenv("AI_MODEL", "gpt-4o-mini"))
+    ai_fallback_model: str = field(default_factory=lambda: os.getenv("AI_FALLBACK_MODEL", "gpt-3.5-turbo"))
+    # Dono
+    owner_id: int = field(default_factory=lambda: int(os.getenv("OWNER_ID", "0")))
+    # Presença
+    status: str = field(default_factory=lambda: os.getenv("BOT_STATUS", "online"))
+    activity_type: str = field(default_factory=lambda: os.getenv("BOT_ACTIVITY_TYPE", "playing").lower())
+    activity: str = field(default_factory=lambda: os.getenv("BOT_ACTIVITY", "NovaEra | !help"))
+    # Banco
+    db_path: str = field(default_factory=lambda: os.getenv("DB_PATH", "database/database.db"))
+    # Cores padrão (hex -> int)
+    color: int = 0x2B2D31
+    success: int = 0x57F287
+    error: int = 0xED4245
+    warn: int = 0xFEE75C
+    info: int = 0x5865F2
+    # Economia
+    daily_amount: int = 500
+    work_min: int = 100
+    work_max: int = 400
+    work_cooldown: int = 3600
+    daily_cooldown: int = 86400
+    rob_cooldown: int = 7200
+    rob_success_chance: float = 0.45
+    # XP / Níveis
+    xp_per_message: int = field(default_factory=lambda: int(os.getenv("XP_PER_MESSAGE", "15")))
+    xp_cooldown: int = 60
+    level_up_base: int = 100
+    level_up_mult: float = 1.5
+    # Auto-mod defaults
+    automod_antispam: bool = True
+    automod_antiflood: bool = True
+    automod_antilinks: bool = False
+    automod_antiinvite: bool = True
+    @property
+    def activity_enum(self):
+        import discord
+        mapping = {
+            "playing": discord.ActivityType.playing,
+            "watching": discord.ActivityType.watching,
+            "listening": discord.ActivityType.listening,
+            "competing": discord.ActivityType.competing,
+            "streaming": discord.ActivityType.streaming,
+        }
+        return mapping.get(self.activity_type, discord.ActivityType.playing)
+    @property
+    def status_enum(self):
+        import discord
+        mapping = {
+            "online": discord.Status.online,
+            "idle": discord.Status.idle,
+            "dnd": discord.Status.dnd,
+            "invisible": discord.Status.invisible,
+        }
+        return mapping.get(self.status, discord.Status.online)
+config = Config()
+
+main.py
+"""NovaEraBot — ponto de entrada."""
+from __future__ import annotations
+import asyncio
+import os
+import sys
+import logging
+import traceback
+import discord
+from discord.ext import commands
+from config import config
+from database.models import db
+from utils.embeds import error as embed_error, success as embed_success
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+log = logging.getLogger("NovaEra")
+INITIAL_COGS = [
+    "cogs.utility",
+    "cogs.moderation",
+    "cogs.automod",
+    "cogs.economy",
+    "cogs.levels",
+    "cogs.tickets",
+    "cogs.music",
+    "cogs.fun",
+    "cogs.welcome",
+    "cogs.logging",
+    "cogs.ai",
+    "cogs.owner",
+    "cogs.settings",
+]
+intents = discord.Intents.all()
+class NovaEraBot(commands.Bot):
+    def __init__(self):
+        super().__init__(
+            command_prefix=commands.when_mentioned_or(config.prefix),
+            intents=intents,
+            help_command=None,
+            case_insensitive=True,
+            strip_after_prefix=True,
+            owner_id=config.owner_id or None,
+        )
+        self.db = db
+        self.config = config
+        self.start_time = discord.utils.utcnow()
+    async def setup_hook(self):
+        await self.db.connect()
+        log.info("Banco de dados conectado em %s", config.db_path)
+        for cog in INITIAL_COGS:
+            try:
+                await self.load_extension(cog)
+                log.info("Cog carregado: %s", cog)
+            except Exception:
+                log.error("Falha ao carregar %s\n%s", cog, traceback.format_exc())
+    async def on_ready(self):
+        if not hasattr(self, "_ready_logged"):
+            log.info("Logado como %s (ID: %s)", self.user, self.user.id)
+            log.info("Em %d servidores", len(self.guilds))
+            self._ready_logged = True
+        await self.change_presence(
+            status=config.status_enum,
+            activity=discord.Activity(
+                type=config.activity_enum, name=config.activity
+            ),
+        )
+async def _on_command_error(bot, ctx, err):
+    if isinstance(err, commands.CommandNotFound):
+        return
+    if isinstance(err, commands.CommandOnCooldown):
+        e = embed_error(
+            "Em cooldown",
+            f"Tente novamente em **{err.retry_after:.1f}s**.\n`{ctx.command}` está em cooldown.",
+        )
+        await ctx.send(embed=e, delete_after=10)
+        return
+    if isinstance(err, commands.MissingPermissions):
+        perms = ", ".join(err.missing_permissions)
+        await ctx.send(embed=embed_error("Sem permissão", f"Faltam: `{perms}`"), delete_after=10)
+        return
+    if isinstance(err, commands.BotMissingPermissions):
+        perms = ", ".join(err.missing_permissions)
+        await ctx.send(embed=embed_error("Sem permissão (bot)", f"Eu preciso: `{perms}`"), delete_after=10)
+        return
+    if isinstance(err, commands.MissingRequiredArgument):
+        await ctx.send(embed=embed_error("Argumento faltando", f"`{err.param.name}` é obrigatório.\nUse `{config.prefix}help {ctx.command}`"))
+        return
+    if isinstance(err, commands.BadArgument):
+        await ctx.send(embed=embed_error("Argumento inválido", str(err)), delete_after=10)
+        return
+    if isinstance(err, commands.NoPrivateMessage):
+        await ctx.send(embed=embed_error("Apenas em servidores", "Este comando não funciona em DM."))
+        return
+    if isinstance(err, commands.NotOwner):
+        await ctx.send(embed=embed_error("Apenas dono", "Comando restrito ao dono do bot."))
+        return
+    if isinstance(err, commands.CheckFailure):
+        await ctx.send(embed=embed_error("Sem permissão", "Você não pode usar este comando."), delete_after=10)
+        return
+    log.error("Erro em %s: %s", ctx.command, err)
+    await ctx.send(embed=embed_error("Erro inesperado", f"```{err}```"), delete_after=15)
+def main():
+    if not config.token:
+        raise SystemExit("DISCORD_TOKEN não definido. Configure o .env.")
+    bot = NovaEraBot()
+    @bot.event
+    async def on_command_error(ctx, err):
+        await _on_command_error(bot, ctx, err)
+    bot.run(config.token, reconnect=True)
+if __name__ == "__main__":
+    main()
+
+database/models.py
+"""Camada de banco de dados do NovaEraBot (aiosqlite)."""
+from __future__ import annotations
+import os
+import aiosqlite
+from config import config
+DB_PATH = config.db_path
+os.makedirs(os.path.dirname(DB_PATH) or ".", exist_ok=True)
+SCHEMA = """
+CREATE TABLE IF NOT EXISTS guilds (
+    guild_id     INTEGER PRIMARY KEY,
+    prefix       TEXT DEFAULT '!',
+    welcome_channel INTEGER,
+    welcome_msg  TEXT,
+    goodbye_channel INTEGER,
+    goodbye_msg  TEXT,
+    welcome_image INTEGER DEFAULT 1,
+    log_channel  INTEGER,
+    level_up_channel INTEGER,
+    level_up_msg TEXT DEFAULT 'Parabéns {user}, você subiu para o nível {level}!',
+    xp_enabled   INTEGER DEFAULT 1,
+    economy_enabled INTEGER DEFAULT 1,
+    suggestions_channel INTEGER,
+    tickets_category INTEGER,
+    tickets_log_channel INTEGER,
+    staff_role INTEGER,
+    mute_role INTEGER,
+    auto_role INTEGER
+);
+CREATE TABLE IF NOT EXISTS members (
+    guild_id INTEGER,
+    user_id  INTEGER,
+    xp       INTEGER DEFAULT 0,
+    level    INTEGER DEFAULT 0,
+    balance  INTEGER DEFAULT 0,
+    bank     INTEGER DEFAULT 0,
+    last_daily REAL DEFAULT 0,
+    last_work   REAL DEFAULT 0,
+    last_rob    REAL DEFAULT 0,
+    warns    INTEGER DEFAULT 0,
+    messages INTEGER DEFAULT 0,
+    PRIMARY KEY (guild_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS warns (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    user_id  INTEGER,
+    mod_id   INTEGER,
+    reason   TEXT,
+    created_at REAL
+);
+CREATE TABLE IF NOT EXISTS afk (
+    guild_id INTEGER,
+    user_id  INTEGER,
+    reason   TEXT,
+    set_at   REAL,
+    PRIMARY KEY (guild_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS tickets (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    channel_id INTEGER,
+    user_id INTEGER,
+    closed INTEGER DEFAULT 0,
+    created_at REAL
+);
+CREATE TABLE IF NOT EXISTS suggestions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    user_id INTEGER,
+    message_id INTEGER,
+    channel_id INTEGER,
+    content TEXT,
+    status TEXT DEFAULT 'pendente',
+    created_at REAL
+);
+CREATE TABLE IF NOT EXISTS automod (
+    guild_id INTEGER PRIMARY KEY,
+    antispam INTEGER DEFAULT 1,
+    antiflood INTEGER DEFAULT 1,
+    antilinks INTEGER DEFAULT 0,
+    antiinvite INTEGER DEFAULT 1,
+    spam_threshold INTEGER DEFAULT 5,
+    spam_window INTEGER DEFAULT 5,
+    flood_threshold INTEGER DEFAULT 7,
+    mute_role INTEGER,
+    log_channel INTEGER
+);
+CREATE TABLE IF NOT EXISTS shop_items (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    name TEXT,
+    description TEXT,
+    price INTEGER,
+    role_id INTEGER,
+    created_at REAL
+);
+CREATE TABLE IF NOT EXISTS inventory (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    user_id INTEGER,
+    item_id INTEGER,
+    quantity INTEGER DEFAULT 1
+);
+CREATE TABLE IF NOT EXISTS level_rewards (
+    guild_id INTEGER,
+    level INTEGER,
+    role_id INTEGER,
+    PRIMARY KEY (guild_id, level)
+);
+CREATE TABLE IF NOT EXISTS ai_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    guild_id INTEGER,
+    user_id INTEGER,
+    role TEXT DEFAULT 'user',
+    content TEXT,
+    created_at REAL
+);
+CREATE TABLE IF NOT EXISTS settings_kv (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+"""
+class Database:
+    def __init__(self, path: str = DB_PATH):
+        self.path = path
+        self._db: aiosqlite.Connection | None = None
+    async def connect(self):
+        self._db = await aiosqlite.connect(self.path)
+        self._db.row_factory = aiosqlite.Row
+        await self._db.executescript(SCHEMA)
+        await self._db.commit()
+        return self
+    async def close(self):
+        if self._db:
+            await self._db.close()
+    @property
+    def db(self) -> aiosqlite.Connection:
+        if self._db is None:
+            raise RuntimeError("Database não conectado. Chame connect() primeiro.")
+        return self._db
+    async def execute(self, sql: str, params: tuple = ()):
+        cur = await self.db.execute(sql, params)
+        await self.db.commit()
+        return cur
+    async def fetchone(self, sql: str, params: tuple = ()):
+        cur = await self.db.execute(sql, params)
+        return await cur.fetchone()
+    async def fetchall(self, sql: str, params: tuple = ()):
+        cur = await self.db.execute(sql, params)
+        return await cur.fetchall()
+    async def get_member(self, guild_id: int, user_id: int):
+        row = await self.fetchone(
+            "SELECT * FROM members WHERE guild_id=? AND user_id=?",
+            (guild_id, user_id),
+        )
+        if row is None:
+            await self.execute(
+                "INSERT OR IGNORE INTO members (guild_id, user_id) VALUES (?,?)",
+                (guild_id, user_id),
+            )
+            row = await self.fetchone(
+                "SELECT * FROM members WHERE guild_id=? AND user_id=?",
+                (guild_id, user_id),
+            )
+        return row
+    async def update_member(self, guild_id: int, user_id: int, **fields):
+        await self.get_member(guild_id, user_id)
+        if not fields:
+            return
+        cols = ", ".join(f"{k}=?" for k in fields)
+        await self.execute(
+            f"UPDATE members SET {cols} WHERE guild_id=? AND user_id=?",
+            (*fields.values(), guild_id, user_id),
+        )
+    async def get_guild(self, guild_id: int):
+        row = await self.fetchone("SELECT * FROM guilds WHERE guild_id=?", (guild_id,))
+        if row is None:
+            await self.execute(
+                "INSERT OR IGNORE INTO guilds (guild_id) VALUES (?)", (guild_id,)
+            )
+            row = await self.fetchone("SELECT * FROM guilds WHERE guild_id=?", (guild_id,))
+        return row
+    async def update_guild(self, guild_id: int, **fields):
+        await self.get_guild(guild_id)
+        if not fields:
+            return
+        cols = ", ".join(f"{k}=?" for k in fields)
+        await self.execute(
+            f"UPDATE guilds SET {cols} WHERE guild_id=?",
+            (*fields.values(), guild_id),
+        )
+    async def get_automod(self, guild_id: int):
+        row = await self.fetchone("SELECT * FROM automod WHERE guild_id=?", (guild_id,))
+        if row is None:
+            await self.execute(
+                "INSERT OR IGNORE INTO automod (guild_id) VALUES (?)", (guild_id,)
+            )
+            row = await self.fetchone("SELECT * FROM automod WHERE guild_id=?", (guild_id,))
+        return row
+    async def update_automod(self, guild_id: int, **fields):
+        await self.get_automod(guild_id)
+        if not fields:
+            return
+        cols = ", ".join(f"{k}=?" for k in fields)
+        await self.execute(
+            f"UPDATE automod SET {cols} WHERE guild_id=?",
+            (*fields.values(), guild_id),
+        )
+db = Database()
+
+utils/embeds.py
+"""Helpers de embed reutilizáveis por todos os cogs."""
+from __future__ import annotations
+import discord
+from config import config
+def base_embed(title: str = "", description: str = "", color: int | None = None) -> discord.Embed:
+    return discord.Embed(
+        title=title,
+        description=description,
+        color=color if color is not None else config.color,
+    )
+def success(title: str = "Sucesso", description: str = "") -> discord.Embed:
+    return base_embed(f"✅ {title}", description, config.success)
+def error(title: str = "Erro", description: str = "") -> discord.Embed:
+    return base_embed(f"❌ {title}", description, config.error)
+def warn(title: str = "Atenção", description: str = "") -> discord.Embed:
+    return base_embed(f"⚠️ {title}", description, config.warn)
+def info(title: str = "Informação", description: str = "") -> discord.Embed:
+    return base_embed(f"ℹ️ {title}", description, config.info)
+def paginated(embeds: list[discord.Embed]) -> list[discord.Embed]:
+    total = len(embeds)
+    for i, e in enumerate(embeds, 1):
+        e.set_footer(text=f"Página {i}/{total} • NovaEra")
+    return embeds
+
+utils/helpers.py
+"""Funções utilitárias compartilhadas."""
+from __future__ import annotations
+import re
+import time
+import asyncio
+import functools
+from typing import Iterable
+URL_REGEX = re.compile(r"https?://\S+", re.IGNORECASE)
+INVITE_REGEX = re.compile(r"(discord\.gg|discord(app)?\.com/invite)/\S+", re.IGNORECASE)
+def now() -> float:
+    return time.time()
+def format_seconds(seconds: float) -> str:
+    seconds = int(seconds)
+    if seconds < 60:
+        return f"{seconds}s"
+    if seconds < 3600:
+        return f"{seconds // 60}m {seconds % 60}s"
+    if seconds < 86400:
+        return f"{seconds // 3600}h {(seconds % 3600) // 60}m"
+    return f"{seconds // 86400}d {(seconds % 86400) // 3600}h"
+def has_links(text: str) -> bool:
+    return bool(URL_REGEX.search(text))
+def has_invites(text: str) -> bool:
+    return bool(INVITE_REGEX.search(text))
+def cooldown_left(last: float, cooldown: float) -> float:
+    elapsed = now() - last
+    return max(0.0, cooldown - elapsed)
+def chunk(seq: list, size: int) -> Iterable[list]:
+    for i in range(0, len(seq), size):
+        yield seq[i : i + size]
+async def to_thread(func, *args, **kwargs):
+    loop = asyncio.get_event_loop()
+    return await loop.run_in_executor(
+        None, functools.partial(func, *args, **kwargs)
+    )
+
+utils/checks.py
+"""Verificações de permissão para comandos."""
+from __future__ import annotations
+import discord
+from discord.ext import commands
+from config import config
+def is_owner():
+    async def predicate(ctx):
+        if ctx.author.id == config.owner_id:
+            return True
+        raise commands.NotOwner
+    return commands.check(predicate)
+def has_guild_perms(**perms):
+    return commands.has_guild_permissions(**perms)
+def is_admin():
+    return commands.has_guild_permissions(administrator=True)
+def is_mod():
+    return commands.has_guild_permissions(
+        manage_messages=True, kick_members=True, ban_members=True
+    )
